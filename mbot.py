@@ -16,6 +16,12 @@ bot = commands.Bot(command_prefix='?', intents=intents)
 
 guild_id = None  # Set your server's guild ID here for faster slash command registration
 
+# Remove all Spotify-related imports, credentials, and logic
+# Only allow searching and playing music by title or YouTube link
+
+# Add a global variable to track the current song info
+current_song = {}
+
 @bot.event
 async def on_ready():
     print(f'Logged in as {bot.user}')
@@ -25,8 +31,9 @@ async def on_ready():
     except Exception as e:
         print(f'Error syncing commands: {e}')
 
-@bot.command(name='music-play', help='Play music by title or link')
+@bot.command(name='music-play', help='Play music by title or YouTube link')
 async def music_play(ctx, *, query: str):
+    global current_song
     user = ctx.author
     voice_state = user.voice
     if not voice_state or not voice_state.channel:
@@ -48,39 +55,50 @@ async def music_play(ctx, *, query: str):
 
     await ctx.send(f'🔍 Searching for: {query}')
 
-    # Search YouTube for the query
-    ydl_opts = {
+    # Always search YouTube with the user query
+    search_opts = {
         'format': 'bestaudio/best',
         'noplaylist': True,
         'default_search': 'ytsearch',
         'quiet': True,
-        'extract_flat': 'in_playlist',
+        'extract_flat': 'True',
     }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+    print(f"yt_query passed to yt-dlp: {query}")
+    with yt_dlp.YoutubeDL(search_opts) as ydl:
         try:
             info = ydl.extract_info(query, download=False)
             if 'entries' in info:
-                info = info['entries'][0]  # Take first result
-            url = info['url'] if 'url' in info else info['webpage_url']
+                info = info['entries'][0]
+            video_url = info['url'] if 'url' in info else info['webpage_url']
             title = info.get('title', 'Unknown Title')
-            webpage_url = info.get('webpage_url', None)
+            webpage_url = info.get('webpage_url', video_url)
             thumbnail = info.get('thumbnail', None)
         except Exception as e:
             await ctx.send(f'❌ Could not find or play "{query}": {e}')
             return
 
-    # Prepare FFmpeg audio source
+    audio_opts = {
+        'format': 'bestaudio/best',
+        'quiet': True,
+    }
+    with yt_dlp.YoutubeDL(audio_opts) as ydl:
+        try:
+            audio_info = ydl.extract_info(video_url, download=False)
+            audio_url = audio_info['url']
+        except Exception as e:
+            await ctx.send(f'❌ Could not extract audio: {e}')
+            return
+
     ffmpeg_options = {
         'options': '-vn',
         'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5'
     }
     try:
-        audio_source = await discord.FFmpegOpusAudio.from_probe(url, **ffmpeg_options)
+        audio_source = await discord.FFmpegOpusAudio.from_probe(audio_url, **ffmpeg_options)
     except Exception as e:
         await ctx.send(f'❌ Error preparing audio: {e}')
         return
 
-    # Play audio
     try:
         if vc.is_playing():
             vc.stop()
@@ -89,7 +107,15 @@ async def music_play(ctx, *, query: str):
         await ctx.send(f'❌ Error playing audio: {e}')
         return
 
-    # Send embed with song info
+    # Track current song info
+    current_song[ctx.guild.id] = {
+        'title': title,
+        'webpage_url': webpage_url,
+        'thumbnail': thumbnail,
+        'requester': user.display_name,
+        'requester_avatar': user.display_avatar.url
+    }
+
     embed = discord.Embed(title='Now Playing', description=f'[{title}]({webpage_url})', color=0x1DB954)
     if thumbnail:
         embed.set_thumbnail(url=thumbnail)
@@ -110,22 +136,51 @@ async def music_help(ctx):
 
 @bot.command(name='music-skip', help='Skip the current song.')
 async def music_skip(ctx):
-    await ctx.send('⏭️ Skipping the current song... (not implemented yet)')
+    vc = ctx.voice_client
+    if vc and vc.is_playing():
+        vc.stop()
+        await ctx.send('⏭️ Skipped the current song.')
+    else:
+        await ctx.send('❌ No song is currently playing.')
 
 @bot.command(name='music-pause', help='Pause the current song.')
 async def music_pause(ctx):
-    await ctx.send('⏸️ Pausing the current song... (not implemented yet)')
+    vc = ctx.voice_client
+    if vc and vc.is_playing():
+        vc.pause()
+        await ctx.send('⏸️ Paused the current song.')
+    else:
+        await ctx.send('❌ No song is currently playing.')
 
 @bot.command(name='music-resume', help='Resume playback.')
 async def music_resume(ctx):
-    await ctx.send('▶️ Resuming playback... (not implemented yet)')
+    vc = ctx.voice_client
+    if vc and vc.is_paused():
+        vc.resume()
+        await ctx.send('▶️ Resumed playback.')
+    else:
+        await ctx.send('❌ No song is currently paused.')
 
 @bot.command(name='music-stop', help='Stop playback and clear the queue.')
 async def music_stop(ctx):
-    await ctx.send('⏹️ Stopping playback and clearing the queue... (not implemented yet)')
+    vc = ctx.voice_client
+    if vc:
+        await vc.disconnect()
+        current_song.pop(ctx.guild.id, None)
+        await ctx.send('⏹️ Stopped playback and disconnected.')
+    else:
+        await ctx.send('❌ I am not connected to a voice channel.')
 
 @bot.command(name='music-nowplaying', help='Show info about the currently playing song.')
 async def music_nowplaying(ctx):
-    await ctx.send('🎶 Now playing info... (not implemented yet)')
+    song = current_song.get(ctx.guild.id)
+    if song:
+        embed = discord.Embed(title='Now Playing', description=f'[{song["title"]}]({song["webpage_url"]})', color=0x1DB954)
+        if song['thumbnail']:
+            embed.set_thumbnail(url=song['thumbnail'])
+        embed.set_footer(text=f'Requested by {song["requester"]}', icon_url=song['requester_avatar'])
+        await ctx.send(embed=embed)
+    else:
+        await ctx.send('❌ No song is currently playing.')
 
 bot.run(TOKEN)
